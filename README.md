@@ -111,7 +111,7 @@ The application uses these environment variables:
 
 Once the application is running, try asking these questions:
 
-- "List all events happening in Dallas" 🏙️
+- "List all venues happening in Dallas" 🏙️
 - "Show me the top 5 events with the most registrations" 🏆
 - "How many tickets have been sold for the Dallas Tech Conference?" 🎟️
 - "What is the total revenue from all events?" 💰

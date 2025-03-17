@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+#!/venv/bin/python3
+import sys
+import argparse
 import psycopg2.extras
 import psycopg2
 import numpy as np
@@ -198,11 +200,11 @@ def create_connection():
     raise Exception("Failed to connect to database after multiple attempts")
 
 def batch_insert(conn, table: str, columns: List[str], data: List[Tuple]):
-    """Insert data in batches if the table is empty."""
+    """Insert data only if table is empty or forced"""
     with conn.cursor() as cursor:
         cursor.execute(f"SELECT COUNT(*) FROM {table}")
         count = cursor.fetchone()[0]
-        if count > 0:
+        if count > 0 and not args.force:
             print(f"Table {table} already has {count} records. Skipping insertion.")
             return
     placeholders = ', '.join(['%s'] * len(columns))
@@ -213,7 +215,10 @@ def batch_insert(conn, table: str, columns: List[str], data: List[Tuple]):
     print(f"Inserted {len(data)} records into {table}")
 
 def write_to_csv(filename: str, columns: list, data: list):
-    """Export data to a CSV file with headers."""
+    """Export data to CSV only if file doesn't exist or forced"""
+    if os.path.exists(filename) and not args.force:
+        print(f"File {filename} already exists. Skipping.")
+        return
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with open(filename, 'w', newline='') as f:
         writer = csv.writer(f)
@@ -223,8 +228,23 @@ def write_to_csv(filename: str, columns: list, data: list):
 
 def main():
     """Generate all synthetic data, insert into the database, and export to CSV files."""
+    # Add command line argument parsing
+    parser = argparse.ArgumentParser(description='Generate synthetic event data')
+    parser.add_argument('--force', action='store_true', 
+                      help='Force regenerate all data and overwrite existing files')
+    args = parser.parse_args()
+    
     conn = create_connection()
     try:
+        # Check if data already exists
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM users")
+            user_count = cursor.fetchone()[0]
+            
+            if user_count > 0 and not args.force:
+                print("Data already exists. Use --force to regenerate.")
+                return
+
         # Users
         users = generate_users()
         user_columns = ['first_name', 'last_name', 'email', 'password_hash', 'phone', 'role', 'created_at', 'updated_at']
@@ -328,4 +348,9 @@ def main():
         conn.close()
 
 if __name__ == '__main__':
+    # Verify we're using virtual environment Python
+    if not sys.prefix.endswith('/venv'):
+        print("❌ Please activate virtual environment first!")
+        print("Run: source venv/bin/activate")
+        sys.exit(1)
     main()
