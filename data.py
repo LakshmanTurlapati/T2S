@@ -199,7 +199,7 @@ def create_connection():
             time.sleep(5)
     raise Exception("Failed to connect to database after multiple attempts")
 
-def batch_insert(conn, table: str, columns: List[str], data: List[Tuple]):
+def batch_insert(conn, table: str, columns: List[str], data: List[Tuple], args) -> None:
     """Insert data only if table is empty or forced"""
     with conn.cursor() as cursor:
         cursor.execute(f"SELECT COUNT(*) FROM {table}")
@@ -214,7 +214,7 @@ def batch_insert(conn, table: str, columns: List[str], data: List[Tuple]):
     conn.commit()
     print(f"Inserted {len(data)} records into {table}")
 
-def write_to_csv(filename: str, columns: list, data: list):
+def write_to_csv(filename: str, columns: list, data: list, args) -> None:
     """Export data to CSV only if file doesn't exist or forced"""
     if os.path.exists(filename) and not args.force:
         print(f"File {filename} already exists. Skipping.")
@@ -248,28 +248,28 @@ def main():
         # Users
         users = generate_users()
         user_columns = ['first_name', 'last_name', 'email', 'password_hash', 'phone', 'role', 'created_at', 'updated_at']
-        batch_insert(conn, 'users', user_columns, users)
-        write_to_csv('csv/users.csv', user_columns, users)
+        batch_insert(conn, 'users', user_columns, users, args)
+        write_to_csv('csv/users.csv', user_columns, users, args)
 
         # Venues
         venues = generate_venues()
         venue_columns = ['name', 'address', 'city', 'state', 'country', 'zip_code', 'latitude', 'longitude', 'capacity', 'created_at']
-        batch_insert(conn, 'venues', venue_columns, venues)
-        write_to_csv('csv/venues.csv', venue_columns, venues)
+        batch_insert(conn, 'venues', venue_columns, venues, args)
+        write_to_csv('csv/venues.csv', venue_columns, venues, args)
 
         # Event Categories
         event_categories = generate_event_categories()
         category_columns = ['name', 'description']
-        batch_insert(conn, 'event_categories', category_columns, event_categories)
-        write_to_csv('csv/event_categories.csv', category_columns, event_categories)
+        batch_insert(conn, 'event_categories', category_columns, event_categories, args)
+        write_to_csv('csv/event_categories.csv', category_columns, event_categories, args)
 
         # Events
         organizer_ids = [i + 1 for i, u in enumerate(users) if u[5] in ('organizer', 'admin')]
         venue_ids = list(range(1, len(venues) + 1))
         events = generate_events(organizer_ids, venue_ids)
         event_columns = ['title', 'description', 'start_time', 'end_time', 'organizer_id', 'venue_id', 'capacity', 'status', 'created_at', 'updated_at']
-        batch_insert(conn, 'events', event_columns, events)
-        write_to_csv('csv/events.csv', event_columns, events)
+        batch_insert(conn, 'events', event_columns, events, args)
+        write_to_csv('csv/events.csv', event_columns, events, args)
 
         # Tickets
         tickets = []
@@ -295,16 +295,16 @@ def main():
                 fake.date_time_this_year().strftime("%Y-%m-%d %H:%M:%S")
             ))
         ticket_columns = ['event_id', 'ticket_type', 'price', 'quantity_available', 'quantity_sold', 'sales_start', 'sales_end', 'created_at']
-        batch_insert(conn, 'tickets', ticket_columns, tickets)
-        write_to_csv('csv/tickets.csv', ticket_columns, tickets)
+        batch_insert(conn, 'tickets', ticket_columns, tickets, args)
+        write_to_csv('csv/tickets.csv', ticket_columns, tickets, args)
 
         # Event Category Mapping
         event_ids = list(range(1, len(events) + 1))
         category_ids = list(range(1, len(event_categories) + 1))
         event_category_mappings = generate_event_category_mapping(event_ids, category_ids)
         mapping_columns = ['event_id', 'category_id']
-        batch_insert(conn, 'event_category_mapping', mapping_columns, event_category_mappings)
-        write_to_csv('csv/event_category_mapping.csv', mapping_columns, event_category_mappings)
+        batch_insert(conn, 'event_category_mapping', mapping_columns, event_category_mappings, args)
+        write_to_csv('csv/event_category_mapping.csv', mapping_columns, event_category_mappings, args)
 
         # Registrations
         user_ids = list(range(1, len(users) + 1))
@@ -314,8 +314,8 @@ def main():
         tickets_remaining = {ticket_id: t[3] for ticket_id, t in enumerate(tickets, 1)}
         registrations = generate_registrations(user_ids, event_ids, ticket_map, ticket_prices, tickets_remaining)
         registration_columns = ['user_id', 'event_id', 'ticket_id', 'quantity', 'total_amount', 'status', 'registered_at', 'payment_status']
-        batch_insert(conn, 'registrations', registration_columns, registrations)
-        write_to_csv('csv/registrations.csv', registration_columns, registrations)
+        batch_insert(conn, 'registrations', registration_columns, registrations, args)
+        write_to_csv('csv/registrations.csv', registration_columns, registrations, args)
 
         # Update tickets' quantity_sold
         updated_tickets = []
@@ -330,19 +330,19 @@ def main():
             for ticket_id, t in enumerate(updated_tickets, 1):
                 cursor.execute("UPDATE tickets SET quantity_sold = %s WHERE ticket_id = %s", (t[4], ticket_id))
         conn.commit()
-        write_to_csv('csv/tickets.csv', ticket_columns, updated_tickets)
+        write_to_csv('csv/tickets.csv', ticket_columns, updated_tickets, args)
 
         # Payments
         payments = generate_payments(registrations)
         payment_columns = ['registration_id', 'user_id', 'amount', 'payment_method', 'transaction_id', 'payment_status', 'paid_at']
-        batch_insert(conn, 'payments', payment_columns, payments)
-        write_to_csv('csv/payments.csv', payment_columns, payments)
+        batch_insert(conn, 'payments', payment_columns, payments, args)
+        write_to_csv('csv/payments.csv', payment_columns, payments, args)
 
         # Notifications
         notifications = generate_notifications(registrations)
         notification_columns = ['user_id', 'event_id', 'message', 'type', 'status', 'sent_at']
-        batch_insert(conn, 'notifications', notification_columns, notifications)
-        write_to_csv('csv/notifications.csv', notification_columns, notifications)
+        batch_insert(conn, 'notifications', notification_columns, notifications, args)
+        write_to_csv('csv/notifications.csv', notification_columns, notifications, args)
 
     finally:
         conn.close()
