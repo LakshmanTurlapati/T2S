@@ -1,14 +1,10 @@
--- Connect to PostgreSQL default database to manage event_management database
-\connect postgres
-
 -- Drop the existing event_management database if it exists
 DROP DATABASE IF EXISTS event_management;
 
 -- Create the event_management database
 CREATE DATABASE event_management;
 
--- Connect to the newly created event_management database
-\connect event_management
+USE event_management;
 
 -- Create tables with lowercase names
 
@@ -65,8 +61,7 @@ CREATE TABLE tickets (
     quantity_sold INT DEFAULT 0,
     sales_start TIMESTAMP,
     sales_end TIMESTAMP,
-    created_at TIMESTAMP,
-    FOREIGN KEY (event_id) REFERENCES events(event_id)
+    created_at TIMESTAMP
 );
 
 -- Registrations Table

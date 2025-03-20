@@ -1,8 +1,6 @@
 #!/venv/bin/python3
 import sys
 import argparse
-import psycopg2.extras
-import psycopg2
 import numpy as np
 from faker import Faker
 from datetime import datetime, timedelta
@@ -18,15 +16,6 @@ random.seed(42)
 np.random.seed(42)
 Faker.seed(42)
 fake = Faker()
-
-# Database connection configuration
-DB_CONFIG = {
-    'host': 'localhost',
-    'port': 5434,
-    'database': 'event_management',
-    'user': 'event_admin',
-    'password': 'securepass'
-}
 
 # Helper function
 def generate_phone_number(city: str) -> str:
@@ -200,10 +189,10 @@ def generate_notifications(registrations: List[Tuple]) -> List[Tuple]:
     notifications = []
     types = ['email', 'sms', 'push']
     for reg in registrations:
+        sent_at = fake.date_time_this_year().strftime("%Y-%m-%d %H:%M:%S") if reg[7] == 'paid' else None
         notifications.append((
             reg[0], reg[1], f"Your registration for event {reg[1]} is confirmed",
-            random.choice(types), 'sent' if reg[7] == 'paid' else 'pending',
-            fake.date_time_this_year().strftime("%Y-%m-%d %H:%M:%S")
+            random.choice(types), 'sent' if reg[7] == 'paid' else 'pending', sent_at
         ))
         if random.random() < 0.5:
             notifications.append((
@@ -220,7 +209,6 @@ def generate_speakers(num_speakers: int) -> List[Tuple]:
         last_name = fake.last_name()
         bio = fake.paragraph(nb_sentences=3)
         email = f"{first_name.lower()}.{last_name.lower()}{i}@speaker.com"
-        # Generate a 10-digit phone number in XXX-XXX-XXXX format
         area_code = random.randint(100, 999)
         exchange_code = random.randint(100, 999)
         line_number = random.randint(1000, 9999)
@@ -242,16 +230,15 @@ def generate_sponsors(num_sponsors: int) -> List[Tuple]:
     return sponsors
 
 def generate_sessions(event_ids: List[int], speaker_ids: List[int], 
-                     num_sessions_per_event: Tuple[int, int], conn) -> List[Tuple]:
+                     num_sessions_per_event: Tuple[int, int], events: List[Tuple]) -> List[Tuple]:
     """Generate session records within event time frames."""
     sessions = []
+    event_time_map = {event_id: (datetime.strptime(event[2], "%Y-%m-%d %H:%M:%S"),
+                                datetime.strptime(event[3], "%Y-%m-%d %H:%M:%S"))
+                     for event_id, event in enumerate(events, 1)}
+    
     for event_id in event_ids:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT start_time, end_time FROM events WHERE event_id = %s", (event_id,))
-            start_time_val, end_time_val = cursor.fetchone()
-        # Ensure that start_time_val and end_time_val are datetime objects
-        start_time = start_time_val if isinstance(start_time_val, datetime) else datetime.strptime(start_time_val, "%Y-%m-%d %H:%M:%S")
-        end_time = end_time_val if isinstance(end_time_val, datetime) else datetime.strptime(end_time_val, "%Y-%m-%d %H:%M:%S")
+        start_time, end_time = event_time_map[event_id]
         duration = (end_time - start_time).total_seconds() / 3600
         num_sessions = random.randint(num_sessions_per_event[0], num_sessions_per_event[1])
         for _ in range(num_sessions):
@@ -340,37 +327,6 @@ def generate_waitlists(user_ids: List[int], event_ids: List[int], total_regs: Di
                 waitlists.append((event_id, user_id, joined_at, status))
     return waitlists
 
-# Database operations
-def create_connection():
-    """Create a database connection with retry logic."""
-    attempts = 0
-    max_attempts = 5
-    while attempts < max_attempts:
-        try:
-            conn = psycopg2.connect(**DB_CONFIG)
-            print("Connected to database successfully!")
-            return conn
-        except psycopg2.OperationalError as e:
-            attempts += 1
-            print(f"Connection attempt {attempts}/{max_attempts} failed: {e}")
-            time.sleep(5)
-    raise Exception("Failed to connect to database after multiple attempts")
-
-def batch_insert(conn, table: str, columns: List[str], data: List[Tuple]):
-    """Insert data only if table is empty or forced."""
-    with conn.cursor() as cursor:
-        cursor.execute(f"SELECT COUNT(*) FROM {table}")
-        count = cursor.fetchone()[0]
-        if count > 0 and not args.force:
-            print(f"Table {table} already has {count} records. Skipping insertion.")
-            return
-    placeholders = ', '.join(['%s'] * len(columns))
-    query = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
-    with conn.cursor() as cursor:
-        psycopg2.extras.execute_batch(cursor, query, data)
-    conn.commit()
-    print(f"Inserted {len(data)} records into {table}")
-
 def write_to_csv(filename: str, columns: List[str], data: List[Tuple]):
     """Export data to CSV only if file doesn't exist or forced."""
     if os.path.exists(filename) and not args.force:
@@ -383,151 +339,147 @@ def write_to_csv(filename: str, columns: List[str], data: List[Tuple]):
         writer.writerows(data)
     print(f"Exported {len(data)} records to {filename}")
 
+def generate_sql_insert(table: str, columns: List[str], data: List[Tuple]) -> str:
+    """Generate SQL INSERT statements for a table, handling None as NULL."""
+    values = ',\n'.join([
+        f"({', '.join(['NULL' if value is None else repr(value) for value in row])})"
+        for row in data
+    ])
+    return f"INSERT INTO {table} ({', '.join(columns)}) VALUES\n{values};\n\n"
+
 def main():
-    """Generate synthetic data, insert into database, and export to CSV."""
+    """Generate synthetic data and create SQL file for insertion."""
     parser = argparse.ArgumentParser(description='Generate synthetic event data')
     parser.add_argument('--force', action='store_true', 
                         help='Force regenerate all data and overwrite existing files')
     global args
     args = parser.parse_args()
 
-    conn = create_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT COUNT(*) FROM users")
-            user_count = cursor.fetchone()[0]
-            if user_count > 0 and not args.force:
-                print("Data already exists. Use --force to regenerate.")
-                return
+    sql_content = []
+    
+    # Users
+    users = generate_users()
+    user_columns = ['first_name', 'last_name', 'email', 'password_hash', 'phone', 'role', 'created_at', 'updated_at']
+    sql_content.append(generate_sql_insert('users', user_columns, users))
 
-        # Users
-        users = generate_users()
-        user_columns = ['first_name', 'last_name', 'email', 'password_hash', 'phone', 'role', 'created_at', 'updated_at']
-        batch_insert(conn, 'users', user_columns, users)
-        write_to_csv('csv/users.csv', user_columns, users)
+    # Venues
+    venues = generate_venues()
+    venue_columns = ['name', 'address', 'city', 'state', 'country', 'zip_code', 'latitude', 'longitude', 'capacity', 'created_at']
+    sql_content.append(generate_sql_insert('venues', venue_columns, venues))
 
-        # Venues
-        venues = generate_venues()
-        venue_columns = ['name', 'address', 'city', 'state', 'country', 'zip_code', 'latitude', 'longitude', 'capacity', 'created_at']
-        batch_insert(conn, 'venues', venue_columns, venues)
-        write_to_csv('csv/venues.csv', venue_columns, venues)
+    # Event Categories
+    event_categories = generate_event_categories()
+    category_columns = ['name', 'description']
+    sql_content.append(generate_sql_insert('event_categories', category_columns, event_categories))
 
-        # Event Categories
-        event_categories = generate_event_categories()
-        category_columns = ['name', 'description']
-        batch_insert(conn, 'event_categories', category_columns, event_categories)
-        write_to_csv('csv/event_categories.csv', category_columns, event_categories)
+    # Events
+    organizer_ids = [i + 1 for i, u in enumerate(users) if u[5] in ('organizer', 'admin')]
+    venue_ids = list(range(1, len(venues) + 1))
+    events = generate_events(organizer_ids, venue_ids)
+    event_columns = ['title', 'description', 'start_time', 'end_time', 'organizer_id', 'venue_id', 'capacity', 'status', 'created_at', 'updated_at']
+    sql_content.append(generate_sql_insert('events', event_columns, events))
+    event_ids = list(range(1, len(events) + 1))
+    event_capacities = {i + 1: event[6] for i, event in enumerate(events)}
 
-        # Events
-        organizer_ids = [i + 1 for i, u in enumerate(users) if u[5] in ('organizer', 'admin')]
-        venue_ids = list(range(1, len(venues) + 1))
-        events = generate_events(organizer_ids, venue_ids)
-        event_columns = ['title', 'description', 'start_time', 'end_time', 'organizer_id', 'venue_id', 'capacity', 'status', 'created_at', 'updated_at']
-        batch_insert(conn, 'events', event_columns, events)
-        write_to_csv('csv/events.csv', event_columns, events)
-        event_ids = list(range(1, len(events) + 1))
-        event_capacities = {i + 1: event[6] for i, event in enumerate(events)}
+    # Tickets
+    tickets = generate_tickets(event_ids, event_capacities)
+    ticket_columns = ['event_id', 'ticket_type', 'price', 'quantity_available', 'quantity_sold', 'sales_start', 'sales_end', 'created_at']
+    sql_content.append(generate_sql_insert('tickets', ticket_columns, tickets))
 
-        # Tickets
-        tickets = generate_tickets(event_ids, event_capacities)
-        ticket_columns = ['event_id', 'ticket_type', 'price', 'quantity_available', 'quantity_sold', 'sales_start', 'sales_end', 'created_at']
-        batch_insert(conn, 'tickets', ticket_columns, tickets)
-        write_to_csv('csv/tickets.csv', ticket_columns, tickets)
+    # Event Category Mapping
+    category_ids = list(range(1, len(event_categories) + 1))
+    event_category_mappings = generate_event_category_mapping(event_ids, category_ids)
+    mapping_columns = ['event_id', 'category_id']
+    sql_content.append(generate_sql_insert('event_category_mapping', mapping_columns, event_category_mappings))
 
-        # Event Category Mapping
-        category_ids = list(range(1, len(event_categories) + 1))
-        event_category_mappings = generate_event_category_mapping(event_ids, category_ids)
-        mapping_columns = ['event_id', 'category_id']
-        batch_insert(conn, 'event_category_mapping', mapping_columns, event_category_mappings)
-        write_to_csv('csv/event_category_mapping.csv', mapping_columns, event_category_mappings)
+    # Registrations
+    user_ids = list(range(1, len(users) + 1))
+    ticket_map = {event_id: [ticket_id for ticket_id, t in enumerate(tickets, 1) if t[0] == event_id] for event_id in event_ids}
+    ticket_prices = {ticket_id: t[2] for ticket_id, t in enumerate(tickets, 1)}
+    tickets_remaining = {ticket_id: t[3] for ticket_id, t in enumerate(tickets, 1)}
+    event_reg_totals = {}
+    registrations = generate_registrations(user_ids, event_ids, ticket_map, ticket_prices, tickets_remaining, event_capacities, event_reg_totals)
+    registration_columns = ['user_id', 'event_id', 'ticket_id', 'quantity', 'total_amount', 'status', 'registered_at', 'payment_status']
+    sql_content.append(generate_sql_insert('registrations', registration_columns, registrations))
 
-        # Registrations
-        user_ids = list(range(1, len(users) + 1))
-        ticket_map = {event_id: [ticket_id for ticket_id, t in enumerate(tickets, 1) if t[0] == event_id] for event_id in event_ids}
-        ticket_prices = {ticket_id: t[2] for ticket_id, t in enumerate(tickets, 1)}
-        tickets_remaining = {ticket_id: t[3] for ticket_id, t in enumerate(tickets, 1)}
-        event_reg_totals = {}
-        registrations = generate_registrations(user_ids, event_ids, ticket_map, ticket_prices, tickets_remaining, event_capacities, event_reg_totals)
-        registration_columns = ['user_id', 'event_id', 'ticket_id', 'quantity', 'total_amount', 'status', 'registered_at', 'payment_status']
-        batch_insert(conn, 'registrations', registration_columns, registrations)
-        write_to_csv('csv/registrations.csv', registration_columns, registrations)
+    # Update tickets' quantity_sold
+    updated_tickets = []
+    for ticket_id, t in enumerate(tickets, 1):
+        orig_available = t[3]
+        sold = orig_available - tickets_remaining.get(ticket_id, 0)
+        sold = min(sold, orig_available)
+        ticket_list = list(t)
+        ticket_list[4] = sold
+        updated_tickets.append(tuple(ticket_list))
+    
+    # Generate SQL for updated tickets
+    sql_content.append(generate_sql_insert('tickets', ticket_columns, updated_tickets))
 
-        # Update tickets' quantity_sold
-        updated_tickets = []
-        for ticket_id, t in enumerate(tickets, 1):
-            orig_available = t[3]
-            sold = orig_available - tickets_remaining.get(ticket_id, 0)
-            sold = min(sold, orig_available)
-            ticket_list = list(t)
-            ticket_list[4] = sold
-            updated_tickets.append(tuple(ticket_list))
-        with conn.cursor() as cursor:
-            for ticket_id, t in enumerate(updated_tickets, 1):
-                cursor.execute("UPDATE tickets SET quantity_sold = %s WHERE ticket_id = %s", (t[4], ticket_id))
-        conn.commit()
-        write_to_csv('csv/tickets.csv', ticket_columns, updated_tickets)
+    # Payments
+    payments = generate_payments(registrations)
+    payment_columns = ['registration_id', 'user_id', 'amount', 'payment_method', 'transaction_id', 'payment_status', 'paid_at']
+    sql_content.append(generate_sql_insert('payments', payment_columns, payments))
 
-        # Payments
-        payments = generate_payments(registrations)
-        payment_columns = ['registration_id', 'user_id', 'amount', 'payment_method', 'transaction_id', 'payment_status', 'paid_at']
-        batch_insert(conn, 'payments', payment_columns, payments)
-        write_to_csv('csv/payments.csv', payment_columns, payments)
+    # Notifications
+    notifications = generate_notifications(registrations)
+    notification_columns = ['user_id', 'event_id', 'message', 'type', 'status', 'sent_at']
+    sql_content.append(generate_sql_insert('notifications', notification_columns, notifications))
 
-        # Notifications
-        notifications = generate_notifications(registrations)
-        notification_columns = ['user_id', 'event_id', 'message', 'type', 'status', 'sent_at']
-        batch_insert(conn, 'notifications', notification_columns, notifications)
-        write_to_csv('csv/notifications.csv', notification_columns, notifications)
+    # Speakers
+    num_speakers = 50
+    speakers = generate_speakers(num_speakers)
+    speakers_columns = ['first_name', 'last_name', 'bio', 'email', 'phone', 'created_at']
+    sql_content.append(generate_sql_insert('speakers', speakers_columns, speakers))
 
-        # Speakers
-        num_speakers = 50
-        speakers = generate_speakers(num_speakers)
-        speakers_columns = ['first_name', 'last_name', 'bio', 'email', 'phone', 'created_at']
-        batch_insert(conn, 'speakers', speakers_columns, speakers)
-        write_to_csv('csv/speakers.csv', speakers_columns, speakers)
+    # Sponsors
+    num_sponsors = 20
+    sponsors = generate_sponsors(num_sponsors)
+    sponsors_columns = ['name', 'description', 'logo_url', 'website', 'created_at']
+    sql_content.append(generate_sql_insert('sponsors', sponsors_columns, sponsors))
 
-        # Sponsors
-        num_sponsors = 20
-        sponsors = generate_sponsors(num_sponsors)
-        sponsors_columns = ['name', 'description', 'logo_url', 'website', 'created_at']
-        batch_insert(conn, 'sponsors', sponsors_columns, sponsors)
-        write_to_csv('csv/sponsors.csv', sponsors_columns, sponsors)
+    # Sessions
+    speaker_ids = list(range(1, num_speakers + 1))
+    sessions = generate_sessions(event_ids, speaker_ids, (1, 5), events)
+    sessions_columns = ['event_id', 'speaker_id', 'title', 'description', 'start_time', 'end_time', 'room', 'created_at']
+    sql_content.append(generate_sql_insert('sessions', sessions_columns, sessions))
 
-        # Sessions
-        speaker_ids = list(range(1, num_speakers + 1))
-        sessions = generate_sessions(event_ids, speaker_ids, (1, 5), conn)
-        sessions_columns = ['event_id', 'speaker_id', 'title', 'description', 'start_time', 'end_time', 'room', 'created_at']
-        batch_insert(conn, 'sessions', sessions_columns, sessions)
-        write_to_csv('csv/sessions.csv', sessions_columns, sessions)
+    # Event Sponsors
+    sponsor_ids = list(range(1, num_sponsors + 1))
+    event_sponsors = generate_event_sponsors(event_ids, sponsor_ids, 3)
+    event_sponsors_columns = ['event_id', 'sponsor_id', 'sponsorship_level', 'contribution_amount']
+    sql_content.append(generate_sql_insert('event_sponsors', event_sponsors_columns, event_sponsors))
 
-        # Event Sponsors
-        sponsor_ids = list(range(1, num_sponsors + 1))
-        event_sponsors = generate_event_sponsors(event_ids, sponsor_ids, 3)
-        event_sponsors_columns = ['event_id', 'sponsor_id', 'sponsorship_level', 'contribution_amount']
-        batch_insert(conn, 'event_sponsors', event_sponsors_columns, event_sponsors)
-        write_to_csv('csv/event_sponsors.csv', event_sponsors_columns, event_sponsors)
+    # Feedback
+    feedback = generate_feedback(registrations, 0.3)
+    feedback_columns = ['event_id', 'user_id', 'rating', 'comment', 'submitted_at']
+    sql_content.append(generate_sql_insert('feedback', feedback_columns, feedback))
 
-        # Feedback
-        feedback = generate_feedback(registrations, 0.3)
-        feedback_columns = ['event_id', 'user_id', 'rating', 'comment', 'submitted_at']
-        batch_insert(conn, 'feedback', feedback_columns, feedback)
-        write_to_csv('csv/feedback.csv', feedback_columns, feedback)
+    # Promotions
+    promotions = generate_promotions(event_ids, 2)
+    promotions_columns = ['event_id', 'code', 'discount_percentage', 'valid_from', 'valid_to', 'created_at']
+    sql_content.append(generate_sql_insert('promotions', promotions_columns, promotions))
 
-        # Promotions
-        promotions = generate_promotions(event_ids, 2)
-        promotions_columns = ['event_id', 'code', 'discount_percentage', 'valid_from', 'valid_to', 'created_at']
-        batch_insert(conn, 'promotions', promotions_columns, promotions)
-        write_to_csv('csv/promotions.csv', promotions_columns, promotions)
+    # Waitlists
+    total_regs = calculate_total_registrations(registrations)
+    waitlists = generate_waitlists(user_ids, event_ids, total_regs, event_capacities, 10, 50)
+    waitlists_columns = ['event_id', 'user_id', 'joined_at', 'status']
+    sql_content.append(generate_sql_insert('waitlists', waitlists_columns, waitlists))
 
-        # Waitlists
-        total_regs = calculate_total_registrations(registrations)
-        waitlists = generate_waitlists(user_ids, event_ids, total_regs, event_capacities, 10, 50)
-        waitlists_columns = ['event_id', 'user_id', 'joined_at', 'status']
-        batch_insert(conn, 'waitlists', waitlists_columns, waitlists)
-        write_to_csv('csv/waitlists.csv', waitlists_columns, waitlists)
-
-    finally:
-        conn.close()
+    # Write all SQL content to a file
+    sql_filename = 'data_insert.sql'
+    if os.path.exists(sql_filename) and not args.force:
+        print(f"File {sql_filename} already exists. Skipping.")
+        return
+        
+    with open(sql_filename, 'w') as f:
+        f.write("-- Auto-generated SQL insert statements\n")
+        f.write("-- Run this file to insert all generated data\n\n")
+        f.write("SET time_zone = '+00:00';\n\n")  # Set session time zone to UTC
+        f.write("BEGIN;\n\n")
+        f.writelines(sql_content)
+        f.write("COMMIT;\n")
+    
+    print(f"SQL file {sql_filename} created successfully!")
 
 if __name__ == '__main__':
     if not sys.prefix.endswith('/venv'):
