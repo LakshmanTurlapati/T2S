@@ -1,5 +1,5 @@
 #!/venv/bin/python3
-import sys
+import sys 
 import argparse
 import psycopg2.extras
 import psycopg2
